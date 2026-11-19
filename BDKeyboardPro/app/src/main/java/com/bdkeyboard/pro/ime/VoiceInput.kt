@@ -6,12 +6,14 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import kotlin.math.roundToInt
 
 /** Wraps SpeechRecognizer. Started only by an explicit mic tap. */
 class VoiceInput(
     private val context: Context,
     private val onState: (State, String?) -> Unit,
-    private val onText: (String) -> Unit
+    private val onText: (String) -> Unit,
+    private val onVolumeLevel: ((dbText: String, levelHint: String) -> Unit)? = null
 ) {
     enum class State { LISTENING, PROCESSING, DONE, ERROR }
 
@@ -29,7 +31,15 @@ class VoiceInput(
             r.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) = onState(State.LISTENING, null)
                 override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onRmsChanged(rmsdB: Float) {
+                    val dbVal = ((rmsdB.coerceIn(-10f, 30f) + 10f) * 2.2f).roundToInt()
+                    val hint = when {
+                        rmsdB < 1.5f -> "আরেকটু জোরে"
+                        rmsdB > 18.0f -> "একটু আস্তে"
+                        else -> "ঠিক আছে"
+                    }
+                    onVolumeLevel?.invoke("${dbVal} dB", hint)
+                }
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() = onState(State.PROCESSING, null)
                 override fun onError(error: Int) {
