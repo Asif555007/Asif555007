@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BD Keyboard Pro</string>
+    <string name="enable_keyboard">Enable keyboard</string>
+    <string name="select_keyboard">Select keyboard</string>
+    <string name="ai_privacy_note">AI features send only the text you choose to our server. Nothing is sent automatically.</string>
+    <string name="voice_privacy_note">Voice typing uses your device\'s speech service. Audio may be processed online.</string>
+    <string name="incognito_on">Private mode on</string>
+</resources>

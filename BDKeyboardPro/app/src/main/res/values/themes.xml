@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.BDKeyboard" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#1FA67A</item>
+    </style>
+    <style name="Theme.BDKeyboard.Transparent" parent="Theme.BDKeyboard">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>
