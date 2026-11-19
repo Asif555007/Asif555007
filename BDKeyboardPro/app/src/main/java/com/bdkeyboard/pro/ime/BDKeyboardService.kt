@@ -13,12 +13,12 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.text.InputType
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
-import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -38,7 +38,7 @@ import kotlinx.coroutines.launch
 
 class BDKeyboardService : InputMethodService() {
 
-    private enum class Panel { NONE, EMOJI, CLIPBOARD, SNIPPETS, AI }
+    private enum class Panel { NONE, EMOJI, CLIPBOARD, SNIPPETS, AI, PHONE_PAD }
 
     private lateinit var prefs: Prefs
     private lateinit var voice: VoiceInput
@@ -49,24 +49,58 @@ class BDKeyboardService : InputMethodService() {
     private var root: LinearLayout? = null
     private var theme = KbTheme.DARK
 
-    // ---- editor / typing state ----
     private val composing = StringBuilder()
-    private var sensitive = false          // password-like field: no learning, suggestions, clipboard, AI, voice
+    private var lastCommittedWord: String? = null
+    private var sensitive = false
     private var noLearning = false
-    private var plainLatin = false         // email / URL / number / phone: no transliteration
-    private var shift = 0                  // 0 off, 1 once, 2 caps lock
+    private var plainLatin = false
+    private var shift = 0
     private var symbols = false
     private var panel = Panel.NONE
     private var suggestions: List<String> = emptyList()
     private var voiceStatus: String? = null
+    private var voiceMeterText: String? = null
+    private var longPressSymbols: List<String>? = null
     private var selStart = 0
     private var selEnd = 0
 
-    // ---- AI panel state ----
     private var aiSource: String = ""
     private var aiResult: String? = null
     private var aiStatus: String? = null
     private var aiJob: Job? = null
+
+    private val longPressMap: Map<Char, List<String>> = mapOf(
+        'a' to listOf("@", "á", "à", "â"),
+        'd' to listOf("৳", "$", "€", "£"),
+        'j' to listOf("+", "=", "×", "÷"),
+        'm' to listOf("?", "!", ";", ":"),
+        's' to listOf("§", "ß", "$"),
+        'e' to listOf("€", "é", "è"),
+        'n' to listOf("ñ", "ং", "ণ"),
+        'o' to listOf("°", "ó", "ô"),
+        'c' to listOf("©", "ç"),
+        'r' to listOf("®", "ড়", "ঢ়")
+    )
+
+    private val banglaLayoutNames = listOf("ফোনেটিক", "জাতীয়", "বর্ণমালা", "ক্লাসিক")
+
+    private val jatiyoRows = listOf(
+        listOf("দ", "ফ", "গ", "জ", "ক", "ল", "প", "ব", "ম", "ত"),
+        listOf("হ", "স", "ড", "য়", "র", "ন", "চ", "ট", "খ", "ধ"),
+        listOf("অ", "আ", "ই", "ঈ", "উ", "ঊ", "এ", "ঐ", "ও", "ঔ")
+    )
+
+    private val bornomalaRows = listOf(
+        listOf("ক", "খ", "গ", "ঘ", "ঙ", "চ", "ছ", "জ", "ঝ", "ঞ"),
+        listOf("ট", "ঠ", "ড", "ঢ", "ণ", "ত", "থ", "দ", "ধ", "ন"),
+        listOf("প", "ফ", "ব", "ভ", "ম", "য", "র", "ল", "শ", "ষ")
+    )
+
+    private val classicRows = listOf(
+        listOf("া", "ি", "ী", "ু", "ূ", "ৃ", "ে", "ৈ", "ো", "ৌ"),
+        listOf("ক", "খ", "গ", "ঘ", "চ", "ছ", "জ", "ট", "ত", "দ"),
+        listOf("প", "ফ", "ব", "ভ", "ম", "য", "র", "ল", "শ", "স")
+    )
 
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
         if (!prefs.clipboardEnabled || prefs.incognito || sensitive) return@OnPrimaryClipChangedListener
@@ -81,12 +115,10 @@ class BDKeyboardService : InputMethodService() {
         "🎉","🎂","🌹","🌙","☀️","⭐","✅","❌","🇧🇩","📞","📧","💬"
     )
 
-    // ------------------------------------------------------------------ lifecycle
-
     override fun onCreate() {
         super.onCreate()
         prefs = Prefs(this)
-        voice = VoiceInput(this, ::onVoiceState, ::onVoiceText)
+        voice = VoiceInput(this, ::onVoiceState, ::onVoiceText, ::onVoiceVolume)
         (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             .addPrimaryClipChangedListener(clipListener)
     }
@@ -110,8 +142,9 @@ class BDKeyboardService : InputMethodService() {
         super.onStartInput(attribute, restarting)
         composing.setLength(0)
         suggestions = emptyList()
+        longPressSymbols = null
         panel = Panel.NONE
-        voice.stop(); voiceStatus = null
+        voice.stop(); voiceStatus = null; voiceMeterText = null
         val type = attribute?.inputType ?: 0
         val cls = type and InputType.TYPE_MASK_CLASS
         val variation = type and InputType.TYPE_MASK_VARIATION
@@ -146,13 +179,10 @@ class BDKeyboardService : InputMethodService() {
     ) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
         selStart = newSelStart; selEnd = newSelEnd
-        // Cursor moved away from the composing region: drop our composing state.
         if (composing.isNotEmpty() && candidatesStart == -1 && candidatesEnd == -1) {
             composing.setLength(0); suggestions = emptyList(); renderSuggestionsOnly()
         }
     }
-
-    // ------------------------------------------------------------------ theme
 
     private fun resolveTheme() {
         theme = when (prefs.theme) {
@@ -163,14 +193,11 @@ class BDKeyboardService : InputMethodService() {
         }
     }
 
-    // ------------------------------------------------------------------ rendering
-
     private fun render() {
         val r = root ?: return
         r.removeAllViews()
         r.setBackgroundColor(theme.bg)
 
-        // One-hand mode: shrink width, push to one side.
         val screenW = resources.displayMetrics.widthPixels
         val side = (screenW * 0.18f).toInt()
         when (prefs.oneHand) {
@@ -204,21 +231,69 @@ class BDKeyboardService : InputMethodService() {
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val h = KeyboardUi.dp(this, 40)
         row.minimumHeight = h
+
+        val lpSyms = longPressSymbols
         when {
-            voiceStatus != null -> row.addView(KeyboardUi.label(this, "🎤 $voiceStatus", theme, 14f).apply { minimumHeight = h; gravity = android.view.Gravity.CENTER_VERTICAL })
+            lpSyms != null -> {
+                lpSyms.forEach { sym ->
+                    row.addView(TextView(this).apply {
+                        text = sym
+                        setTextColor(theme.accent)
+                        textSize = 18f
+                        minimumHeight = h
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(KeyboardUi.dp(context, 14), 0, KeyboardUi.dp(context, 14), 0)
+                        setOnClickListener {
+                            type(sym)
+                            longPressSymbols = null
+                            renderSuggestionsOnly()
+                        }
+                    })
+                }
+            }
+            voiceStatus != null -> {
+                val meter = voiceMeterText?.let { " [$it]" }.orEmpty()
+                row.addView(KeyboardUi.label(this, "🎤 $voiceStatus$meter", theme, 13f).apply {
+                    minimumHeight = h; gravity = Gravity.CENTER_VERTICAL
+                })
+            }
             suggestions.isNotEmpty() -> suggestions.forEachIndexed { i, s ->
                 row.addView(TextView(this).apply {
                     text = s
                     setTextColor(if (i == 0) theme.accent else theme.text)
                     textSize = 18f
                     minimumHeight = h
-                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    gravity = Gravity.CENTER_VERTICAL
                     setPadding(KeyboardUi.dp(context, 14), 0, KeyboardUi.dp(context, 14), 0)
                     setOnClickListener { pickSuggestion(i) }
                 })
             }
-            prefs.incognito -> row.addView(KeyboardUi.label(this, "🔒 Private mode on — no learning or clipboard capture", theme, 12f).apply { minimumHeight = h; gravity = android.view.Gravity.CENTER_VERTICAL })
-            else -> row.addView(KeyboardUi.label(this, if (prefs.banglaMode && !plainLatin) "বাংলা (phonetic)" else "English", theme, 12f).apply { minimumHeight = h; gravity = android.view.Gravity.CENTER_VERTICAL })
+            prefs.incognito -> row.addView(KeyboardUi.label(this, "🔒 Private mode on — no learning or clipboard capture", theme, 12f).apply {
+                minimumHeight = h; gravity = Gravity.CENTER_VERTICAL
+            })
+            else -> {
+                val nextPred = if (!prefs.incognito && !noLearning) lastCommittedWord?.let { prefs.predictNextWord(it) } else null
+                val modeLabel = if (prefs.banglaMode && !plainLatin) "বাংলা (${banglaLayoutNames[prefs.banglaLayoutMode]})" else "English"
+                val statusText = if (nextPred != null) "$modeLabel · Next: $nextPred" else modeLabel
+                row.addView(KeyboardUi.label(this, statusText, theme, 12f).apply {
+                    minimumHeight = h; gravity = Gravity.CENTER_VERTICAL
+                })
+                if (nextPred != null) {
+                    row.addView(TextView(this).apply {
+                        text = nextPred
+                        setTextColor(theme.accent)
+                        textSize = 16f
+                        minimumHeight = h
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(KeyboardUi.dp(context, 12), 0, KeyboardUi.dp(context, 12), 0)
+                        setOnClickListener {
+                            currentInputConnection?.commitText("$nextPred ", 1)
+                            lastCommittedWord = nextPred
+                            renderSuggestionsOnly()
+                        }
+                    })
+                }
+            }
         }
         sv.addView(row)
         return sv
@@ -230,21 +305,29 @@ class BDKeyboardService : InputMethodService() {
         fun tool(label: String, desc: String, active: Boolean = false, click: () -> Unit) {
             row.addView(TextView(this).apply {
                 text = label
-                textSize = 16f
+                textSize = 15f
                 contentDescription = desc
-                gravity = android.view.Gravity.CENTER
+                gravity = Gravity.CENTER
                 setTextColor(if (active) android.graphics.Color.WHITE else theme.text)
                 background = KeyboardUi.bg(if (active) theme.accent else theme.keyAlt, 14, context)
-                setPadding(KeyboardUi.dp(context, 12), KeyboardUi.dp(context, 4), KeyboardUi.dp(context, 12), KeyboardUi.dp(context, 4))
+                setPadding(KeyboardUi.dp(context, 11), KeyboardUi.dp(context, 4), KeyboardUi.dp(context, 11), KeyboardUi.dp(context, 4))
                 layoutParams = LinearLayout.LayoutParams(-2, -2).apply { setMargins(KeyboardUi.dp(context, 3), KeyboardUi.dp(context, 3), KeyboardUi.dp(context, 3), KeyboardUi.dp(context, 3)) }
                 setOnClickListener { click() }
             })
         }
         tool("🎤", "Voice typing", voiceStatus != null) { toggleVoice() }
+        tool("🔢", "Phone number pad", panel == Panel.PHONE_PAD) { togglePanel(Panel.PHONE_PAD) }
         tool("😀", "Emoji", panel == Panel.EMOJI) { togglePanel(Panel.EMOJI) }
         tool("📋", "Clipboard", panel == Panel.CLIPBOARD) { togglePanel(Panel.CLIPBOARD) }
         tool("⚡", "Snippets", panel == Panel.SNIPPETS) { togglePanel(Panel.SNIPPETS) }
         tool("✨ AI", "AI writing tools", panel == Panel.AI) { openAi() }
+        if (prefs.banglaMode) {
+            tool(banglaLayoutNames[prefs.banglaLayoutMode], "Bangla layout style", true) {
+                finishComposing()
+                prefs.banglaLayoutMode = (prefs.banglaLayoutMode + 1) % 4
+                render()
+            }
+        }
         tool("🎨", "Switch theme") { prefs.theme = (prefs.theme + 1) % 3; resolveTheme(); render() }
         tool("☝", "One-hand mode", prefs.oneHand != 0) { prefs.oneHand = (prefs.oneHand + 1) % 3; render() }
         tool("🔒", "Private mode", prefs.incognito) {
@@ -264,10 +347,8 @@ class BDKeyboardService : InputMethodService() {
         render()
     }
 
-    // ------------------------------------------------------------------ keys
-
     private val letterRows = listOf("qwertyuiop", "asdfghjkl", "zxcvbnm")
-    private val symRows = listOf("1234567890", "@#\$_&-+()/", "*\"':;!?%=", "~`|•√π÷×{}")
+    private val symRows = listOf("1234567890", "@#$_&-+()/", "*\"':;!?%=", "~`|•√π÷×{}")
 
     private fun buildKeys(parent: LinearLayout) {
         val t = theme
@@ -277,7 +358,6 @@ class BDKeyboardService : InputMethodService() {
                 rowChars.forEach { ch -> row.addView(charKey(ch.toString())) }
                 parent.addView(row)
             }
-            // Editing controls: cursor, select all, cut/copy/paste
             val edit = KeyboardUi.row(this)
             edit.addView(KeyboardUi.key(this, "◀", t, alt = true, desc = "Cursor left") { moveCursor(KeyEvent.KEYCODE_DPAD_LEFT) })
             edit.addView(KeyboardUi.key(this, "▶", t, alt = true, desc = "Cursor right") { moveCursor(KeyEvent.KEYCODE_DPAD_RIGHT) })
@@ -292,22 +372,52 @@ class BDKeyboardService : InputMethodService() {
                 "1234567890".forEach { row.addView(charKey(it.toString(), alt = true, height = 38)) }
                 parent.addView(row)
             }
-            letterRows.forEachIndexed { idx, letters ->
-                val row = KeyboardUi.row(this)
-                if (idx == 1) row.addView(spacer(0.5f))
-                if (idx == 2) {
-                    row.addView(KeyboardUi.key(this, if (shift == 2) "⇪" else "⇧", t, 1.5f, alt = true, accent = shift != 0, desc = "Shift") { cycleShift() })
+            val activeBanglaGrid = if (prefs.banglaMode && !plainLatin) {
+                when (prefs.banglaLayoutMode) {
+                    1 -> jatiyoRows
+                    2 -> bornomalaRows
+                    3 -> classicRows
+                    else -> null
                 }
-                letters.forEach { c ->
-                    val shown = if (shift != 0) c.uppercaseChar() else c
-                    row.addView(charKey(shown.toString()))
+            } else null
+
+            if (activeBanglaGrid != null) {
+                activeBanglaGrid.forEachIndexed { idx, glyphs ->
+                    val row = KeyboardUi.row(this)
+                    if (idx == 2) {
+                        row.addView(KeyboardUi.key(this, "⌫", t, 1.3f, alt = true, desc = "Backspace") { onBackspace() })
+                    }
+                    glyphs.forEach { g ->
+                        row.addView(KeyboardUi.key(this, g, t, 1f, heightDp = 46, sizeSp = 17f) {
+                            buzz()
+                            commitTopCandidate(learn = true)
+                            currentInputConnection?.commitText(g, 1)
+                        })
+                    }
+                    if (idx == 2) {
+                        row.addView(KeyboardUi.key(this, "⏎", t, 1.3f, accent = true, desc = "Enter") { onEnter() })
+                    }
+                    parent.addView(row)
                 }
-                if (idx == 1) row.addView(spacer(0.5f))
-                if (idx == 2) row.addView(backspaceKey(1.5f))
-                parent.addView(row)
+            } else {
+                letterRows.forEachIndexed { idx, letters ->
+                    val row = KeyboardUi.row(this)
+                    if (idx == 1) row.addView(spacer(0.5f))
+                    if (idx == 2) {
+                        row.addView(KeyboardUi.key(this, if (shift == 2) "⇪" else "⇧", t, 1.5f, alt = true, accent = shift != 0, desc = "Shift") { cycleShift() })
+                    }
+                    letters.forEach { c ->
+                        val shown = if (shift != 0) c.uppercaseChar() else c
+                        val lpList = longPressMap[c.lowercaseChar()]
+                        val hint = lpList?.firstOrNull()
+                        row.addView(charKey(shown.toString(), cornerHint = hint, longPressList = lpList))
+                    }
+                    if (idx == 1) row.addView(spacer(0.5f))
+                    if (idx == 2) row.addView(backspaceKey(1.5f))
+                    parent.addView(row)
+                }
             }
         }
-        // Bottom row
         val bottom = KeyboardUi.row(this)
         bottom.addView(KeyboardUi.key(this, if (symbols) "ABC" else "?123", t, 1.3f, alt = true, desc = "Symbols") { symbols = !symbols; render() })
         bottom.addView(KeyboardUi.key(this, if (prefs.banglaMode) "বাং" else "EN", t, 1.1f, alt = true, desc = "Switch language") { toggleLanguage() })
@@ -335,22 +445,92 @@ class BDKeyboardService : InputMethodService() {
 
     private fun spacer(w: Float) = View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 1, w) }
 
-    private fun charKey(label: String, alt: Boolean = false, height: Int = 46): View =
-        KeyboardUi.key(this, label, theme, 1f, heightDp = height, alt = alt) { onChar(label) }
+    private fun charKey(
+        label: String,
+        alt: Boolean = false,
+        height: Int = 46,
+        cornerHint: String? = null,
+        longPressList: List<String>? = null
+    ): View {
+        val longHandler: ((View) -> Boolean)? = if (!longPressList.isNullOrEmpty()) {
+            {
+                buzz()
+                longPressSymbols = longPressList
+                renderSuggestionsOnly()
+                true
+            }
+        } else null
+        return KeyboardUi.key(
+            this, label, theme, 1f, heightDp = height, alt = alt,
+            cornerHint = cornerHint, onLongClick = longHandler
+        ) {
+            longPressSymbols = null
+            onChar(label)
+        }
+    }
 
     private fun backspaceKey(weight: Float): View {
         val k = KeyboardUi.key(this, "⌫", theme, weight, alt = true, desc = "Backspace") {}
+        var downX = 0f
+        var clearedAll = false
         val repeat = object : Runnable {
-            override fun run() { onBackspace(); handler.postDelayed(this, 50) }
+            override fun run() {
+                if (!clearedAll) {
+                    onBackspace()
+                    handler.postDelayed(this, 65)
+                }
+            }
         }
         k.setOnTouchListener { v, e ->
             when (e.action) {
-                MotionEvent.ACTION_DOWN -> { v.isPressed = true; onBackspace(); handler.postDelayed(repeat, 400) }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { v.isPressed = false; handler.removeCallbacks(repeat) }
+                MotionEvent.ACTION_DOWN -> {
+                    v.isPressed = true
+                    downX = e.rawX
+                    clearedAll = false
+                    onBackspace()
+                    handler.postDelayed(repeat, 420)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - downX
+                    if (dx < -220f && !clearedAll) {
+                        clearedAll = true
+                        handler.removeCallbacks(repeat)
+                        composing.setLength(0)
+                        suggestions = emptyList()
+                        currentInputConnection?.deleteSurroundingText(500, 500)
+                        renderSuggestionsOnly()
+                    } else if (dx < -48f && !clearedAll) {
+                        downX = e.rawX
+                        deletePreviousWord()
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.isPressed = false
+                    handler.removeCallbacks(repeat)
+                }
             }
             true
         }
         return k
+    }
+
+    private fun deletePreviousWord() {
+        val ic = currentInputConnection ?: return
+        if (composing.isNotEmpty()) {
+            composing.setLength(0)
+            suggestions = emptyList()
+            ic.setComposingText("", 1)
+            renderSuggestionsOnly()
+            return
+        }
+        val before = ic.getTextBeforeCursor(80, 0)?.toString().orEmpty()
+        if (before.isEmpty()) return
+        val trimmed = before.trimEnd()
+        val lastSpace = trimmed.lastIndexOf(' ')
+        val charsToDelete = if (lastSpace >= 0) before.length - (lastSpace + 1) else before.length
+        if (charsToDelete > 0) {
+            ic.deleteSurroundingText(charsToDelete, 0)
+        }
     }
 
     private fun cycleShift() {
@@ -364,22 +544,22 @@ class BDKeyboardService : InputMethodService() {
         render()
     }
 
-    // ------------------------------------------------------------------ text input
-
     private fun onChar(ch: String) {
         buzz()
         val isLetter = ch.length == 1 && ch[0].isLetter()
-        val transliterate = prefs.banglaMode && !plainLatin && isLetter
-        if (transliterate) {
+        val usePhonetic = prefs.banglaMode && prefs.banglaLayoutMode == 0 && !plainLatin && isLetter
+        if (usePhonetic) {
             composing.append(ch)
             updateComposing()
+        } else if (!prefs.banglaMode && !plainLatin && isLetter) {
+            composing.append(ch)
+            updateEnglishComposing()
         } else {
             type(ch)
         }
         if (shift == 1) { shift = 0; render() }
     }
 
-    /** Commit any composition, then insert literal text (digits honour the digit-style setting). */
     private fun type(s: String) {
         commitTopCandidate(learn = true)
         val out = if (prefs.bengaliDigits && !plainLatin) BanglaPhonetic.toBengaliDigits(s) else s
@@ -396,17 +576,37 @@ class BDKeyboardService : InputMethodService() {
         renderSuggestionsOnly()
     }
 
+    private fun updateEnglishComposing() {
+        val ic = currentInputConnection ?: return
+        val raw = composing.toString()
+        if (raw.isEmpty()) { ic.commitText("", 1); suggestions = emptyList(); renderSuggestionsOnly(); return }
+        val engCands = BanglaPhonetic.englishSuggestions(raw)
+        ic.setComposingText(raw, 1)
+        suggestions = if (sensitive) emptyList() else (engCands + raw).distinct().take(6)
+        renderSuggestionsOnly()
+    }
+
     private fun candidatesFor(latin: String): List<String> {
-        val learned = prefs.learnedWords()
-            .mapNotNull { e -> e.split("\u0000", limit = 2).takeIf { it.size == 2 && it[0] == latin.lowercase() }?.get(1) }
+        val learned = if (!prefs.incognito && !noLearning) {
+            prefs.learnedWords()
+                .mapNotNull { e -> e.split("\u0000", limit = 2).takeIf { it.size == 2 && it[0] == latin.lowercase() }?.get(1) }
+        } else emptyList()
         return (learned + BanglaPhonetic.candidates(latin)).distinct()
     }
 
     private fun commitTopCandidate(learn: Boolean) {
         if (composing.isEmpty()) return
-        val latin = composing.toString()
-        val top = candidatesFor(latin).firstOrNull() ?: latin
+        val raw = composing.toString()
+        val top = if (prefs.banglaMode && prefs.banglaLayoutMode == 0 && !plainLatin) {
+            candidatesFor(raw).firstOrNull() ?: raw
+        } else {
+            raw
+        }
         currentInputConnection?.commitText(top, 1)
+        if (learn && !prefs.incognito && !noLearning) {
+            lastCommittedWord?.let { prev -> prefs.recordBigram(prev, top) }
+            lastCommittedWord = top
+        }
         composing.setLength(0); suggestions = emptyList(); renderSuggestionsOnly()
     }
 
@@ -422,9 +622,12 @@ class BDKeyboardService : InputMethodService() {
         val latin = composing.toString()
         val ic = currentInputConnection ?: return
         ic.commitText("$chosen ", 1)
-        // Learn only a deliberate non-default choice, never in private mode or sensitive fields.
-        if (!prefs.incognito && !noLearning && latin.isNotEmpty() && chosen != latin && index > 0) {
-            prefs.addLearned("${latin.lowercase()}\u0000$chosen")
+        if (!prefs.incognito && !noLearning) {
+            if (latin.isNotEmpty() && chosen != latin && index > 0) {
+                prefs.addLearned("${latin.lowercase()}\u0000$chosen")
+            }
+            lastCommittedWord?.let { prev -> prefs.recordBigram(prev, chosen) }
+            lastCommittedWord = chosen
         }
         composing.setLength(0); suggestions = emptyList(); renderSuggestionsOnly()
     }
@@ -442,7 +645,11 @@ class BDKeyboardService : InputMethodService() {
         val ic = currentInputConnection ?: return
         if (composing.isNotEmpty()) {
             composing.deleteCharAt(composing.length - 1)
-            updateComposing()
+            if (prefs.banglaMode && prefs.banglaLayoutMode == 0 && !plainLatin) {
+                updateComposing()
+            } else {
+                updateEnglishComposing()
+            }
         } else if (ic.getSelectedText(0).isNullOrEmpty()) {
             ic.deleteSurroundingText(1, 0)
         } else {
@@ -471,37 +678,38 @@ class BDKeyboardService : InputMethodService() {
             ?.vibrate(VibrationEffect.createOneShot(12, VibrationEffect.DEFAULT_AMPLITUDE))
     }
 
-    // ------------------------------------------------------------------ voice
-
     private fun toggleVoice() {
-        if (voiceStatus != null) { voice.stop(); voiceStatus = null; render(); return }
+        if (voiceStatus != null) { voice.stop(); voiceStatus = null; voiceMeterText = null; render(); return }
         if (sensitive) { voiceStatus = null; return }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            // Ask only now, at the moment the user taps the mic.
             startActivity(Intent(this, MicPermissionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             voiceStatus = "Allow microphone, then tap 🎤 again"
             render(); return
         }
         finishComposing()
-        voice.start(if (prefs.banglaMode) "bn-BD" else "en-US")
+        val langTag = if (prefs.banglaMode && !plainLatin) "bn-BD" else "en-US"
+        voice.start(langTag)
+    }
+
+    private fun onVoiceVolume(dbText: String, levelHint: String) {
+        voiceMeterText = "$dbText · $levelHint"
+        renderSuggestionsOnly()
     }
 
     private fun onVoiceState(state: VoiceInput.State, msg: String?) {
         voiceStatus = when (state) {
-            VoiceInput.State.LISTENING -> "Listening… tap 🎤 to cancel"
-            VoiceInput.State.PROCESSING -> "Processing (speech service may use the network)…"
-            VoiceInput.State.DONE -> null
-            VoiceInput.State.ERROR -> msg ?: "Voice error"
+            VoiceInput.State.LISTENING -> "Listening…"
+            VoiceInput.State.PROCESSING -> "Processing…"
+            VoiceInput.State.DONE -> { voiceMeterText = null; null }
+            VoiceInput.State.ERROR -> { voiceMeterText = null; msg ?: "Voice error" }
         }
         render()
-        if (state == VoiceInput.State.ERROR) handler.postDelayed({ voiceStatus = null; render() }, 2500)
+        if (state == VoiceInput.State.ERROR) handler.postDelayed({ voiceStatus = null; voiceMeterText = null; render() }, 2500)
     }
 
     private fun onVoiceText(text: String) {
         currentInputConnection?.commitText(text, 1)
     }
-
-    // ------------------------------------------------------------------ panels
 
     private fun panelFrame(content: View): View {
         val h = KeyboardUi.dp(this, 46 * 4 + 12)
@@ -517,6 +725,7 @@ class BDKeyboardService : InputMethodService() {
         val pad = KeyboardUi.dp(this, 6)
         col.setPadding(pad, pad, pad, pad)
         when (panel) {
+            Panel.PHONE_PAD -> buildPhonePadPanel(col)
             Panel.EMOJI -> emojis.chunked(8).forEach { chunk ->
                 val row = KeyboardUi.row(this)
                 chunk.forEach { e -> row.addView(KeyboardUi.key(this, e, theme, sizeSp = 22f) { type(e) }) }
@@ -531,6 +740,36 @@ class BDKeyboardService : InputMethodService() {
         return panelFrame(col)
     }
 
+    private fun buildPhonePadPanel(col: LinearLayout) {
+        val padRows = listOf(
+            listOf("1", "2", "3"),
+            listOf("4", "5", "6"),
+            listOf("7", "8", "9"),
+            listOf("*", "0", "#")
+        )
+        padRows.forEach { rKeys ->
+            val row = KeyboardUi.row(this)
+            rKeys.forEach { keyStr ->
+                val display = if (prefs.bengaliDigits && keyStr.all { it in '0'..'9' }) {
+                    BanglaPhonetic.toBengaliDigits(keyStr)
+                } else keyStr
+                row.addView(KeyboardUi.key(this, display, theme, 1f, heightDp = 42, sizeSp = 18f) {
+                    buzz()
+                    currentInputConnection?.commitText(display, 1)
+                })
+            }
+            col.addView(row)
+        }
+        val ctl = KeyboardUi.row(this)
+        ctl.addView(KeyboardUi.key(this, "␣", theme, 1.5f, alt = true, heightDp = 38) { onSpace() })
+        ctl.addView(KeyboardUi.key(this, "⌫", theme, 1.2f, alt = true, heightDp = 38) { onBackspace() })
+        ctl.addView(KeyboardUi.key(this, "⏎", theme, 1.3f, accent = true, heightDp = 38) { onEnter() })
+        ctl.addView(KeyboardUi.key(this, "Close", theme, 1f, alt = true, heightDp = 38, sizeSp = 13f) {
+            panel = Panel.NONE; render()
+        })
+        col.addView(ctl)
+    }
+
     private fun buildClipboardPanel(col: LinearLayout) {
         if (!prefs.clipboardEnabled) {
             col.addView(KeyboardUi.label(this, "Clipboard history is off. It is stored only on this device and is never collected from password fields.", theme))
@@ -542,9 +781,24 @@ class BDKeyboardService : InputMethodService() {
         val items = prefs.clipItems()
         if (items.isEmpty()) col.addView(KeyboardUi.label(this, "Nothing copied yet.", theme))
         items.forEach { clip ->
+            val pinned = prefs.isPinned(clip)
             val row = KeyboardUi.row(this)
+            row.addView(KeyboardUi.key(
+                this,
+                if (pinned) "📌" else "📍",
+                theme,
+                0.2f,
+                alt = !pinned,
+                accent = pinned,
+                heightDp = 40,
+                sizeSp = 14f,
+                desc = if (pinned) "Unpin item" else "Pin item"
+            ) {
+                prefs.togglePinClip(clip)
+                render()
+            })
             row.addView(TextView(this).apply {
-                text = clip.take(120)
+                text = if (pinned) "[Pinned] ${clip.take(110)}" else clip.take(120)
                 maxLines = 2
                 setTextColor(theme.text)
                 background = KeyboardUi.bg(theme.key, 7, context)
@@ -552,12 +806,12 @@ class BDKeyboardService : InputMethodService() {
                 layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(2, 3, 2, 3) }
                 setOnClickListener { type(clip) }
             })
-            row.addView(KeyboardUi.key(this, "✕", theme, 0.18f, alt = true, desc = "Delete item") { prefs.removeClip(clip); render() })
+            row.addView(KeyboardUi.key(this, "✕", theme, 0.18f, alt = true, heightDp = 40, desc = "Delete item") { prefs.removeClip(clip); render() })
             col.addView(row)
         }
         val ctl = KeyboardUi.row(this)
         ctl.addView(KeyboardUi.key(this, "Clear all", theme, alt = true) { prefs.clearClips(); render() })
-        ctl.addView(KeyboardUi.key(this, "Turn off", theme, alt = true) { prefs.clipboardEnabled = false; prefs.clearClips(); render() })
+        ctl.addView(KeyboardUi.key(this, "Turn off", theme, alt = true) { prefs.clipboardEnabled = false; prefs.clearAllClipsIncludingPinned(); render() })
         col.addView(ctl)
     }
 
@@ -571,12 +825,10 @@ class BDKeyboardService : InputMethodService() {
                 background = KeyboardUi.bg(theme.key, 7, context)
                 setPadding(KeyboardUi.dp(context, 10), KeyboardUi.dp(context, 10), KeyboardUi.dp(context, 10), KeyboardUi.dp(context, 10))
                 layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(2, 3, 2, 3) }
-                setOnClickListener { type(text) } // explicit insert; text stays editable in the field
+                setOnClickListener { type(text) }
             })
         }
     }
-
-    // ------------------------------------------------------------------ AI panel
 
     private fun openAi() {
         if (panel == Panel.AI) { panel = Panel.NONE; render(); return }
@@ -652,13 +904,12 @@ class BDKeyboardService : InputMethodService() {
         }
     }
 
-    /** Never silently overwrites: Replace only affects the user's current selection. */
     private fun insertAi(text: String, replace: Boolean) {
         val ic: InputConnection = currentInputConnection ?: return
         if (replace) {
-            ic.commitText(text, 1)            // replaces current selection, or inserts at cursor if none
+            ic.commitText(text, 1)
         } else {
-            ic.setSelection(selEnd, selEnd)   // collapse selection to its end, keep original text
+            ic.setSelection(selEnd, selEnd)
             ic.commitText(text, 1)
         }
         panel = Panel.NONE; aiResult = null; render()
