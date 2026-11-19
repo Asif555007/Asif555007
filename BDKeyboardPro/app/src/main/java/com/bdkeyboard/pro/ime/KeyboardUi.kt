@@ -7,6 +7,7 @@ import android.graphics.drawable.GradientDrawable
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -34,24 +35,64 @@ object KeyboardUi {
         setColor(color); cornerRadius = dp(c, radiusDp).toFloat()
     }
 
-    /** A tappable key/button. weight lets rows distribute width. */
+    /** A tappable key/button with optional corner hint and long-press action. */
     fun key(
-        c: Context, label: String, t: KbTheme, weight: Float = 1f, heightDp: Int = 46,
-        alt: Boolean = false, accent: Boolean = false, sizeSp: Float = 17f,
-        desc: String? = null, onClick: (View) -> Unit
-    ): TextView = TextView(c).apply {
-        text = label
-        gravity = Gravity.CENTER
-        setTextColor(if (accent) Color.WHITE else t.text)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
-        typeface = Typeface.DEFAULT
-        background = bg(if (accent) t.accent else if (alt) t.keyAlt else t.key, 7, c)
-        contentDescription = desc ?: label
-        isClickable = true
-        layoutParams = LinearLayout.LayoutParams(0, dp(c, heightDp), weight).apply {
-            setMargins(dp(c, 2), dp(c, 3), dp(c, 2), dp(c, 3))
+        c: Context,
+        label: String,
+        t: KbTheme,
+        weight: Float = 1f,
+        heightDp: Int = 46,
+        alt: Boolean = false,
+        accent: Boolean = false,
+        sizeSp: Float = 17f,
+        cornerHint: String? = null,
+        desc: String? = null,
+        onLongClick: ((View) -> Boolean)? = null,
+        onClick: (View) -> Unit
+    ): View {
+        val container = FrameLayout(c).apply {
+            background = bg(if (accent) t.accent else if (alt) t.keyAlt else t.key, 7, c)
+            contentDescription = desc ?: label
+            isClickable = true
+            isFocusable = true
+            layoutParams = LinearLayout.LayoutParams(0, dp(c, heightDp), weight).apply {
+                setMargins(dp(c, 2), dp(c, 3), dp(c, 2), dp(c, 3))
+            }
+            setOnClickListener(onClick)
+            if (onLongClick != null) {
+                setOnLongClickListener(onLongClick)
+            }
         }
-        setOnClickListener(onClick)
+
+        val mainTv = TextView(c).apply {
+            text = label
+            gravity = Gravity.CENTER
+            setTextColor(if (accent) Color.WHITE else t.text)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
+            typeface = Typeface.DEFAULT
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        container.addView(mainTv)
+
+        if (!cornerHint.isNullOrBlank()) {
+            val hintTv = TextView(c).apply {
+                text = cornerHint
+                setTextColor(if (accent) Color.WHITE else t.accent)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+                setPadding(0, dp(c, 2), dp(c, 4), 0)
+                gravity = Gravity.TOP or Gravity.END
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+            container.addView(hintTv)
+        }
+
+        return container
     }
 
     fun row(c: Context): LinearLayout = LinearLayout(c).apply {
