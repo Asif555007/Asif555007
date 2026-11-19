@@ -267,7 +267,7 @@ class BDKeyboardService : InputMethodService() {
     // ------------------------------------------------------------------ keys
 
     private val letterRows = listOf("qwertyuiop", "asdfghjkl", "zxcvbnm")
-    private val symRows = listOf("1234567890", "@#$_&-+()/", "*\"':;!?%=", "~`|•√π÷×{}")
+    private val symRows = listOf("1234567890", "@#\$_&-+()/", "*\"':;!?%=", "~`|•√π÷×{}")
 
     private fun buildKeys(parent: LinearLayout) {
         val t = theme
