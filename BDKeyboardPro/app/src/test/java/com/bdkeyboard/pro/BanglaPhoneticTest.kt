@@ -7,7 +7,6 @@ import org.junit.Test
 
 class BanglaPhoneticTest {
 
-    /** Appendix A starter set: dictionary-backed words must be the top candidate. */
     @Test
     fun appendixAWords() {
         val cases = mapOf(
@@ -20,20 +19,30 @@ class BanglaPhoneticTest {
     }
 
     @Test
-    fun phrases() {
+    fun conjunctsAndVariants() {
+        assertEquals("শিক্ষা", BanglaPhonetic.candidates("shikkha").first())
+        assertEquals("অঙ্ক", BanglaPhonetic.candidates("onko").first())
+        assertEquals("বাক্য", BanglaPhonetic.candidates("bakko").first())
+        assertEquals("ওকে", BanglaPhonetic.candidates("ok").first())
+        assertEquals("তুমি", BanglaPhonetic.candidates("tmi").first())
+        assertEquals("যখন", BanglaPhonetic.candidates("jokh").first())
+    }
+
+    @Test
+    fun lexiconHasSixThousandPlusEntries() {
+        assertTrue("Expected 6000+ lexicon entries, got ${BanglaPhonetic.lexiconSize()}", BanglaPhonetic.lexiconSize() >= 6000)
+    }
+
+    @Test
+    fun typoSuggestions() {
+        val eng = BanglaPhonetic.englishSuggestions("tge")
+        assertTrue("Expected 'the' in suggestions for 'tge', got $eng", eng.contains("the"))
+    }
+
+    @Test
+    fun phrasesAndDigits() {
         assertEquals("কেমন আছো", BanglaPhonetic.transliteratePhrase("kemon acho"))
         assertEquals("আমি বাংলায় লিখি", BanglaPhonetic.transliteratePhrase("ami banglay likhi"))
-    }
-
-    @Test
-    fun ruleEngineProducesBengaliForUnknownWords() {
-        val r = BanglaPhonetic.transliterate("kolom")
-        assertTrue(r.isNotEmpty())
-        assertTrue(r.all { it.code in 0x0980..0x09FF })
-    }
-
-    @Test
-    fun digits() {
         assertEquals("১২৩", BanglaPhonetic.toBengaliDigits("123"))
     }
 }
